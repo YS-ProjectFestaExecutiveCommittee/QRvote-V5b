@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>大会ブース投票</title>
+    <!-- フォント: Noto Sans JP -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Noto Sans JP', sans-serif; background-color: #f3f4f6; }
+        .spinner { border: 4px solid rgba(0, 0, 0, 0.1); width: 36px; height: 36px; border-radius: 50%; border-left-color: #3b82f6; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- ハニーポット -->
+    <input type="checkbox" id="hp-trap" class="opacity-0 absolute -z-10" tabindex="-1" autocomplete="off">
+
+    <div class="bg-white rounded-2xl shadow-xl p-8 w-full max-w-sm text-center">
+        <h1 class="text-2xl font-bold text-gray-800 mb-6">出店ブース投票</h1>
+
+        <!-- ローディング -->
+        <div id="loading-section" class="flex flex-col items-center justify-center py-4">
+            <div class="spinner mb-4"></div>
+            <p id="loading-text" class="text-sm text-gray-600">システムを準備中...<br>（位置情報と環境を確認します）</p>
+        </div>
+
+        <!-- 投票確認 -->
+        <div id="ready-section" class="hidden flex flex-col items-center">
+            <div class="bg-blue-50 text-blue-700 px-4 py-2 rounded-lg mb-4 w-full">
+                ブース番号: <span id="display-booth-id" class="text-2xl font-bold ml-2">---</span>
+            </div>
+            <p class="text-sm text-gray-600 mb-6">このブースに投票しますか？</p>
+            <button id="vote-btn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-xl shadow-md transition duration-200 transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none">
+                投票する
+            </button>
+        </div>
+
+        <!-- 成功 -->
+        <div id="success-section" class="hidden flex flex-col items-center py-4">
+            <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-4">
+                <svg class="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+            </div>
+            <h2 class="text-xl font-bold text-gray-800 mb-2">投票完了</h2>
+            <p class="text-sm text-gray-600">ご投票ありがとうございました！</p>
+        </div>
+
+        <!-- エラー -->
+        <div id="error-section" class="hidden flex flex-col items-center py-4">
+            <div class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-4">
+                <svg class="w-8 h-8 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </div>
+            <h2 class="text-xl font-bold text-gray-800 mb-2">エラー</h2>
+            <p id="error-message" class="text-sm text-gray-600 bg-red-50 p-3 rounded-lg w-full">予期せぬエラーが発生しました。</p>
+        </div>
+    </div>
+
+    <script>
+        // === 設定項目 ===
+        const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycby8NGtKxD10qwmntaBYi_gUApRUQPmGu_m9Z_Rug_FaZrb4GAatuP-Cj-oX1kOOvKXF/exec'; 
+        const EVENT_LATITUDE = 35.49083280578642; // 会場の緯度
+        const EVENT_LONGITUDE = 139.639665860905; // 会場の経度
+        const ALLOWED_RADIUS_METERS = 100000; // 許可する半径(m)
+        const REQUIRED_ACCURACY_METERS = 200; // GPSに求める最低精度(誤差150m以内を要求)
+
+        // 状態変数
+        let boothId = null;
+        let visitorId = null;
+        let deviceFingerprint = null;
+        let pageLoadTime = Date.now();
+        let hasHumanInteraction = false;
+
+        const secLoading = document.getElementById('loading-section');
+        const secReady = document.getElementById('ready-section');
+        const secSuccess = document.getElementById('success-section');
+        const secError = document.getElementById('error-section');
+        const txtLoading = document.getElementById('loading-text');
+        const txtError = document.getElementById('error-message');
+        const displayBoothId = document.getElementById('display-booth-id');
+        const btnVote = document.getElementById('vote-btn');
+        const trapCheckbox = document.getElementById('hp-trap');
+
+        // 人間の操作監視
+        ['touchstart', 'mousemove', 'scroll', 'keydown'].forEach(evt => {
+            window.addEventListener(evt, () => { hasHumanInteraction = true; }, { once: true });
+        });
+
+        // 複合デバイスフィンガープリントの生成 (シークレットモード対策)
+        function generateDeviceFingerprint() {
+            try {
+                // ハードウェア情報
+                const hwInfo = [
+                    navigator.userAgent,
+                    screen.width + 'x' + screen.height,
+                    screen.colorDepth,
+                    navigator.language,
+                    navigator.hardwareConcurrency || 'unknown',
+                    navigator.deviceMemory || 'unknown',
+                    new Date().getTimezoneOffset()
+                ].join('|');
+
+                // Canvas情報
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                ctx.textBaseline = "top";
+                ctx.font = "14px 'Arial'";
+                ctx.fillStyle = "#f60";
+                ctx.fillRect(125,1,62,20);
+                ctx.fillStyle = "#069";
+                ctx.fillText("VoteSystem_" + EVENT_LATITUDE, 2, 15);
+                const canvasDataURL = canvas.toDataURL();
+
+                // 結合してハッシュ化
+                const rawString = hwInfo + '|' + canvasDataURL;
+                let hash = 0;
+                for (let i = 0; i < rawString.length; i++) {
+                    const char = rawString.charCodeAt(i);
+                    hash = ((hash << 5) - hash) + char;
+                    hash = hash & hash;
+                }
+                return Math.abs(hash).toString(16);
+            } catch(e) {
+                return 'fp-error-' + Math.random().toString(36).substring(2);
+            }
+        }
+
+        window.onload = () => { initApp(); };
+
+        async function initApp() {
+            const urlParams = new URLSearchParams(window.location.search);
+            boothId = urlParams.get('booth_id');
+
+            if (!boothId) {
+                showError('無効なQRコードです。（ブースIDが見つかりません）');
+                return;
+            }
+            displayBoothId.textContent = boothId;
+
+            // ID生成処理
+            deviceFingerprint = generateDeviceFingerprint();
+            let localId = localStorage.getItem('visitor_local_id');
+            if (!localId) {
+                localId = crypto.randomUUID ? crypto.randomUUID() : 'v_' + Math.random().toString(36).substring(2);
+                localStorage.setItem('visitor_local_id', localId);
+            }
+            visitorId = localId; // 識別IDとして使用
+
+            txtLoading.innerHTML = '会場内にいるか確認しています...<br>（位置情報の許可をお願いします）';
+            
+            if (!navigator.geolocation) {
+                showError('お使いの端末は位置情報機能に対応していません。');
+                return;
+            }
+
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    const accuracy = position.coords.accuracy;
+                    const dist = calculateDistance(EVENT_LATITUDE, EVENT_LONGITUDE, position.coords.latitude, position.coords.longitude);
+                    
+                    // 精度チェック (偽装アプリや地下での大きな誤差を弾く)
+                    if (accuracy > REQUIRED_ACCURACY_METERS) {
+                        showError(`位置情報の精度が低すぎます。(誤差約${Math.round(accuracy)}m)<br>見晴らしの良い場所で再度読み込んでください。`);
+                        return;
+                    }
+
+                    // 距離チェック
+                    if (dist <= ALLOWED_RADIUS_METERS) {
+                        showReady();
+                    } else {
+                        showError(`会場外からの投票はできません。(現在地から会場まで約${Math.round(dist)}m)`);
+                    }
+                },
+                (error) => {
+                    showError('位置情報が取得できませんでした。端末の設定で位置情報を許可してください。');
+                },
+                { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 } // 高精度を強制
+            );
+        }
+
+        btnVote.addEventListener('click', async () => {
+            if (!hasHumanInteraction) { showError('不正な操作が検出されました。（画面操作が確認できません）'); return; }
+            if (Date.now() - pageLoadTime < 1500) { showError('操作が早すぎます。Botによる操作の疑いがあります。'); return; }
+            if (trapCheckbox.checked) { showError('不正な操作が検出されました。（ハニーポット作動）'); return; }
+
+            // ボタンを無効化して連打防止
+            btnVote.disabled = true;
+            secReady.classList.add('hidden');
+            secLoading.classList.remove('hidden');
+            txtLoading.textContent = '投票を送信しています...';
+
+            const payload = {
+                visitorId: visitorId,
+                fingerprint: deviceFingerprint, // バックエンドのシークレットモード対策用
+                boothId: boothId,
+                timestamp: new Date().toISOString()
+            };
+
+            try {
+                const response = await fetch(GAS_WEB_APP_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+
+                if (result.success) {
+                    showSuccess();
+                } else {
+                    if (result.message === 'already_voted') {
+                        showError('このブースには既に投票済みです。');
+                    } else if (result.message === 'cooldown_active') {
+                        showError('連続で処理を行えません。少し時間をおいてください。');
+                    } else if (result.message === 'max_votes_reached') {
+                        showError('お一人様が投票できる最大数（上限）に達しました。');
+                    } else if (result.message === 'out_of_voting_period') {
+                        showError('現在は投票受付時間外です。');
+                    } else {
+                        showError('エラー: ' + result.message);
+                    }
+                    btnVote.disabled = false; // エラー時はやり直せるようにする
+                }
+            } catch (error) {
+                showError('通信エラーが発生しました。ネットワーク環境を確認してください。');
+                btnVote.disabled = false;
+            }
+        });
+
+        function calculateDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371e3; 
+            const p1 = lat1 * Math.PI/180;
+            const p2 = lat2 * Math.PI/180;
+            const dp = (lat2-lat1) * Math.PI/180;
+            const dl = (lon2-lon1) * Math.PI/180;
+            const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        function showReady() { secLoading.classList.add('hidden'); secReady.classList.remove('hidden'); }
+        function showSuccess() { secLoading.classList.add('hidden'); secSuccess.classList.remove('hidden'); }
+        function showError(msg) { secLoading.classList.add('hidden'); secReady.classList.add('hidden'); secError.classList.remove('hidden'); txtError.innerHTML = msg; }
+    </script>
+</body>
+</html>
